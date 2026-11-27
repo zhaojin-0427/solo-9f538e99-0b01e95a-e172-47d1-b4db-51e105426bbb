@@ -9,6 +9,7 @@
   var form = document.getElementById("job-form");
   var errBox = document.getElementById("form-errors");
   var svg = document.getElementById("editor-preview");
+  var claimContext = document.getElementById("claim-context");
   if (!tbody || !form) return;
 
   function el(tag, attrs, text) {
@@ -157,6 +158,10 @@
     document.getElementById("f-h").value = restored.paper_h || "";
     (restored.frames || []).forEach(addRow);
     if (!restored.frames || !restored.frames.length) { addRow(); addRow(); addRow(); }
+  } else if (claimContext) {
+    // Claim flow: dimensions are server-rendered and locked; start with a
+    // few blank frame rows instead of overwriting the leftover dimensions.
+    addRow(); addRow(); addRow();
   } else {
     // Convenient starting point.
     document.getElementById("f-w").value = 100;
@@ -180,6 +185,11 @@
         return r.x || r.y || r.w || r.h;
       })
     };
+
+    if (claimContext) {
+      payload.claim_source_job_id = claimContext.dataset.sourceJob;
+      payload.claim_piece_id = claimContext.dataset.sourcePiece;
+    }
 
     fetch(form.action, {
       method: "POST",

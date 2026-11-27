@@ -20,6 +20,9 @@ from samples import SAMPLE_BY_KEY, SAMPLES
 from solver import Box, Rect, plan_state
 from validation import ValidationError, frames_from_form, parse_job_payload
 
+ClaimRejected = storage.ClaimRejected
+CutRejected = storage.CutRejected
+
 
 def create_app(db_path: Optional[str] = None) -> Flask:
     app = Flask(__name__)
@@ -150,47 +153,287 @@ def create_app(db_path: Optional[str] = None) -> Flask:
             "lines": line_views,
         }
 
+    def _render_index(
+        errors: Optional[List[str]] = None,
+        old_payload: Optional[Dict[str, Any]] = None,
+        status: int = 200,
+        claim: Optional[Dict[str, Any]] = None,
+    ):
+        return (
+            render_template(
+                "index.html",
+                job_stats=index_job_stats(),
+                samples=SAMPLES,
+                errors=errors,
+                old_payload=old_payload,
+                claim=claim,
+            ),
+            status,
+        )
+
+    def _claim_ref_from_values(
+        source_job_value: Any, piece_value: Any
+    ) -> Optional[tuple[int, int]]:
+        if source_job_value is None and piece_value is None:
+            return None
+        if source_job_value == "" and piece_value == "":
+            return None
+        try:
+            return int(source_job_value), int(piece_value)
+        except (TypeError, ValueError):
+            raise ValueError("领用出处的印张号和纸片号必须是整数。")
+
+    def _json_claim_ref(data: Any) -> Optional[tuple[int, int]]:
+        if not isinstance(data, dict):
+            return None
+        nested = data.get("claim")
+        nested = nested if isinstance(nested, dict) else {}
+        source_job = (
+            data.get("claim_source_job_id")
+            or data.get("source_job_id")
+            or nested.get("source_job_id")
+            or nested.get("source_job_id")
+        )
+        piece = (
+            data.get("claim_piece_id")
+            or data.get("source_piece_id")
+            or data.get("claimed_piece_id")
+            or nested.get("piece_id")
+            or nested.get("source_piece_id")
+        )
+        return _claim_ref_from_values(source_job, piece)
+
+    def _form_claim_ref(form: Any) -> Optional[tuple[int, int]]:
+        return _claim_ref_from_values(
+            form.get("claim_source_job_id") or form.get("source_job_id"),
+            form.get("claim_piece_id")
+            or form.get("source_piece_id")
+            or form.get("piece_id"),
+        )
+
     # ------------------------------------------------------------------
     # Pages
     # ------------------------------------------------------------------
 
     @app.get("/")
     def index():
-        return render_template(
-            "index.html",
-            job_stats=index_job_stats(),
-            samples=SAMPLES,
-            errors=None,
-            old_payload=None,
+        claim = None
+        source_job_id = request.args.get("claim_job", type=int) or request.args.get(
+            "source_job_id", type=int
         )
+        piece_id = (
+            request.args.get("piece", type=int)
+            or request.args.get("claim_piece_id", type=int)
+            or request.args.get("piece_id", type=int)
+            or request.args.get("source_piece_id", type=int)
+        )
+        # Allow a globally unique piece id without explicitly naming its job.
+        if piece_id and not source_job_id:
+            piece = storage.get_piece_by_id(app.config["DB_PATH"], piece_id)
+            source_job_id = piece["job_id"] if piece is not None else None
+        if source_job_id and piece_id:
+            ctx = storage.get_claim_context(
+                app.config["DB_PATH"], source_job_id, piece_id
+            )
+            if not ctx["claimable"]:
+                flash(ctx["reason"], "error")
+                return redirect(url_for("job_page", job_id=source_job_id))
+            claim = ctx
+        return _render_index(claim=claim)
 
-    @app.post("/jobs")
-    def create_job_route():
+    @app.get("/jobs/new")
+    def new_job_form_route():
+        # Convenient bookmarkable alias for the ordinary entry form.
+        query = request.query_string.decode()
+        return redirect(url_for("index") + (f"?{query}" if query else ""))
+
+    @app.get("/jobs/<int:source_job_id>/pieces/<int:piece_id>/claim")
+    @app.get("/jobs/<int:source_job_id>/claim/<int:piece_id>")
+    def claim_piece_form_route(source_job_id: int, piece_id: int):
+        ctx = storage.get_claim_context(
+            app.config["DB_PATH"], source_job_id, piece_id
+        )
+        if not ctx["claimable"]:
+            flash(ctx["reason"], "error")
+            return redirect(url_for("job_page", job_id=source_job_id))
+        return _render_index(claim=ctx)
+
+    def _create_job_response(
+        forced_claim_ref: Optional[tuple[int, int]] = None,
+    ):
+        db = app.config["DB_PATH"]
+        claim_ref = forced_claim_ref
+        claim_ctx: Optional[Dict[str, Any]] = None
+
         if request.is_json:
             payload = request.get_json(silent=True)
+            if claim_ref is None:
+                try:
+                    claim_ref = _json_claim_ref(payload)
+                except ValueError as ve:
+                    return jsonify({"ok": False, "errors": [str(ve)]}), 400
+
+            if claim_ref is not None:
+                source_job_id, piece_id = claim_ref
+                claim_ctx = storage.get_claim_context(db, source_job_id, piece_id)
+                if not claim_ctx["claimable"]:
+                    return (
+                        jsonify(
+                            {
+                                "ok": False,
+                                "error_code": claim_ctx["reason_code"],
+                                "error": claim_ctx["reason"],
+                            }
+                        ),
+                        409,
+                    )
+                assert claim_ctx["piece"] is not None
+                if isinstance(payload, dict):
+                    payload["paper_w"] = claim_ctx["piece_w"]
+                    payload["paper_h"] = claim_ctx["piece_h"]
+
             try:
                 name, w, h, frames = parse_job_payload(payload)
             except ValidationError as ve:
                 return jsonify({"ok": False, "errors": ve.errors}), 400
-            jid = storage.create_job(app.config["DB_PATH"], name, w, h, frames)
-            return jsonify({"ok": True, "redirect": url_for("job_page", job_id=jid)})
+
+            try:
+                if claim_ref is not None:
+                    source_job_id, piece_id = claim_ref
+                    jid = storage.claim_and_create_job(
+                        db, source_job_id, piece_id, name, frames, w, h
+                    )
+                else:
+                    jid = storage.create_job(db, name, w, h, frames)
+            except ClaimRejected as cr:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error_code": cr.code,
+                            "error": cr.message,
+                            "reasons": cr.reasons,
+                        }
+                    ),
+                    409,
+                )
+            return jsonify(
+                {
+                    "ok": True,
+                    "job_id": jid,
+                    "new_job_id": jid,
+                    "redirect": url_for("job_page", job_id=jid),
+                }
+            )
 
         payload = frames_from_form(request.form)
+        if claim_ref is None:
+            try:
+                claim_ref = _form_claim_ref(request.form)
+            except ValueError as ve:
+                flash(str(ve), "error")
+                return redirect(url_for("index"))
+
+        if claim_ref is not None:
+            source_job_id, piece_id = claim_ref
+            claim_ctx = storage.get_claim_context(db, source_job_id, piece_id)
+            if not claim_ctx["claimable"]:
+                flash(claim_ctx["reason"], "error")
+                if claim_ctx["source_job"] is not None:
+                    return redirect(url_for("job_page", job_id=source_job_id))
+                return redirect(url_for("index"))
+            payload["paper_w"] = claim_ctx["piece_w"]
+            payload["paper_h"] = claim_ctx["piece_h"]
+
         try:
             name, w, h, frames = parse_job_payload(payload)
         except ValidationError as ve:
-            return (
-                render_template(
-                    "index.html",
-                    job_stats=index_job_stats(),
-                    samples=SAMPLES,
-                    errors=ve.errors,
-                    old_payload=payload,
-                ),
-                422,
+            return _render_index(
+                errors=ve.errors,
+                old_payload=payload,
+                status=422,
+                claim=claim_ctx if claim_ctx and claim_ctx["claimable"] else None,
             )
-        jid = storage.create_job(app.config["DB_PATH"], name, w, h, frames)
+
+        try:
+            if claim_ref is not None:
+                source_job_id, piece_id = claim_ref
+                jid = storage.claim_and_create_job(
+                    db, source_job_id, piece_id, name, frames, w, h
+                )
+            else:
+                jid = storage.create_job(db, name, w, h, frames)
+        except ClaimRejected as cr:
+            flash(cr.message, "error")
+            return redirect(url_for("job_page", job_id=source_job_id))
+
+        if claim_ref is not None:
+            flash(
+                f"已领用源印张 #{source_job_id} 的纸片 #{piece_id}，"
+                f"并按其余纸宽高 {w}×{h} mm 开成试印新印张 #{jid}。",
+                "ok",
+            )
         return redirect(url_for("job_page", job_id=jid))
+
+    @app.post("/jobs")
+    def create_job_route():
+        return _create_job_response()
+
+    @app.post("/jobs/<int:source_job_id>/pieces/<int:piece_id>/claim")
+    @app.post("/jobs/<int:source_job_id>/claim/<int:piece_id>")
+    def claim_piece_route(source_job_id: int, piece_id: int):
+        return _create_job_response((source_job_id, piece_id))
+
+    @app.get("/pieces/<int:piece_id>/claim")
+    def claim_piece_form_by_piece_route(piece_id: int):
+        piece = storage.get_piece_by_id(app.config["DB_PATH"], piece_id)
+        if piece is None:
+            flash("纸片不存在。", "error")
+            return redirect(url_for("index"))
+        return redirect(
+            url_for(
+                "claim_piece_form_route",
+                source_job_id=piece["job_id"],
+                piece_id=piece_id,
+            )
+        )
+
+    @app.post("/jobs/<int:source_job_id>/claim")
+    def claim_from_job_route(source_job_id: int):
+        data = request.get_json(silent=True) if request.is_json else request.form
+        try:
+            piece_id = int(data.get("piece_id") or data.get("claim_piece_id"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "piece_id 必须是整数。"}), 400
+        return _create_job_response((source_job_id, piece_id))
+
+    @app.post("/pieces/<int:piece_id>/claim")
+    def claim_piece_by_piece_route(piece_id: int):
+        # Compatibility endpoint: piece ids are globally unique.
+        piece = storage.get_piece_by_id(app.config["DB_PATH"], piece_id)
+        if piece is None:
+            if request.is_json:
+                return jsonify({"ok": False, "error": "piece not found"}), 404
+            flash("纸片不存在。", "error")
+            return redirect(url_for("index"))
+        return _create_job_response((piece["job_id"], piece_id))
+
+    @app.post("/claims")
+    def create_claim_route():
+        data = request.get_json(silent=True) if request.is_json else request.form
+        try:
+            source_job_id = data.get("source_job_id") or data.get("claim_source_job_id")
+            piece_id = (
+                data.get("piece_id")
+                or data.get("source_piece_id")
+                or data.get("claim_piece_id")
+            )
+            ref = _claim_ref_from_values(source_job_id, piece_id)
+        except ValueError as ve:
+            return jsonify({"ok": False, "error": str(ve)}), 400
+        if ref is None:
+            return jsonify({"ok": False, "error": "piece_id is required"}), 400
+        return _create_job_response(ref)
 
     @app.post("/samples/<key>")
     def create_sample(key: str):
@@ -223,6 +466,9 @@ def create_app(db_path: Optional[str] = None) -> Flask:
         frames = storage.list_frames(db, job_id)
         pieces = storage.list_pieces(db, job_id)
         cuts = storage.list_cuts(db, job_id)
+        provenance = storage.get_claim_info(db, job_id)
+        claim_contexts = storage.list_piece_claim_contexts(db, job_id)
+        claim_ctx_by_piece = {c["piece"]["id"]: c for c in claim_contexts if c["piece"]}
         plan = build_plan(job_id)
         diagram = build_diagram(job, frames, pieces, plan)
         active_pieces = [p for p in pieces if p["status"] == "active"]
@@ -240,6 +486,8 @@ def create_app(db_path: Optional[str] = None) -> Flask:
             diagram=diagram,
             active_pieces=active_pieces,
             first_step=first_step,
+            provenance=provenance,
+            claim_ctx_by_piece=claim_ctx_by_piece,
             counts={"done": done, "ruined": ruined, "pending": pending},
         )
 
@@ -248,6 +496,16 @@ def create_app(db_path: Optional[str] = None) -> Flask:
         if _load_job_or_none(job_id) is None:
             return jsonify({"ok": False, "error": "job not found"}), 404
         return jsonify({"ok": True, "plan": build_plan(job_id)})
+
+    @app.get("/jobs/<int:job_id>/provenance")
+    @app.get("/jobs/<int:job_id>/provenance.json")
+    def provenance_json(job_id: int):
+        if _load_job_or_none(job_id) is None:
+            return jsonify({"ok": False, "error": "job not found"}), 404
+        info = storage.get_claim_info(app.config["DB_PATH"], job_id)
+        if info is None:
+            return jsonify({"ok": True, "provenance": None})
+        return jsonify({"ok": True, "provenance": info})
 
     @app.post("/jobs/<int:job_id>/cuts")
     def register_cut_route(job_id: int):
@@ -333,6 +591,62 @@ def create_app(db_path: Optional[str] = None) -> Flask:
         storage.reset_progress(app.config["DB_PATH"], job_id)
         flash("已清空全部落刀登记，纸张恢复为完整印张，重新排算。", "ok")
         return redirect(url_for("job_page", job_id=job_id))
+
+    @app.post("/claims/<int:job_id>/return")
+    @app.post("/jobs/<int:job_id>/return-claim")
+    @app.post("/jobs/<int:job_id>/return")
+    @app.post("/jobs/<int:job_id>/claim/return")
+    def return_claim_route(job_id: int):
+        db = app.config["DB_PATH"]
+        wants_json = request.is_json or (
+            "application/json" in request.headers.get("Accept", "")
+        )
+        if _load_job_or_none(job_id) is None:
+            if wants_json:
+                return jsonify({"ok": False, "error": "job not found"}), 404
+            flash("印张不存在。", "error")
+            return redirect(url_for("index"))
+
+        try:
+            result = storage.return_claimed_job(db, job_id)
+        except ClaimRejected as cr:
+            if wants_json:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error_code": cr.code,
+                            "error": cr.message,
+                            "reasons": cr.reasons,
+                        }
+                    ),
+                    409,
+                )
+            flash(cr.message, "error")
+            return redirect(url_for("job_page", job_id=job_id))
+
+        source_job_id = result["source_job_id"]
+        source_piece_id = result["source_piece_id"]
+        source_exists = storage.get_job(db, source_job_id) is not None
+        redirect_url = (
+            url_for("job_page", job_id=source_job_id)
+            if source_exists
+            else url_for("index")
+        )
+        if wants_json:
+            return jsonify(
+                {
+                    "ok": True,
+                    "result": result,
+                    "redirect": redirect_url,
+                }
+            )
+        flash(
+            f"试印新印张 #{job_id} 已撤销；源印张 #{source_job_id} 的"
+            f"纸片 #{source_piece_id} 已恢复为可裁活纸片。",
+            "ok",
+        )
+        return redirect(redirect_url)
 
     @app.post("/jobs/<int:job_id>/delete")
     def delete_route(job_id: int):

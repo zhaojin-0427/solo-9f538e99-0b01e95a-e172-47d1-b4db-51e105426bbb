@@ -1,6 +1,25 @@
 {% extends "base.html" %}
-{% block title %}新开印张 · 裁纸师{% endblock %}
+{% block title %}{% if claim %}余纸开试印张{% else %}新开印张{% endif %} · 裁纸师{% endblock %}
 {% block content %}
+
+{% if claim %}
+<div class="card claim-banner" id="claim-context"
+     data-source-job="{{ claim.source_job.id }}"
+     data-source-piece="{{ claim.piece.id }}">
+  <h1 style="font-size:20px;margin-bottom:6px">领用空白余纸开试印张</h1>
+  <div class="claim-provenance-line">
+    出处：源印张 <strong>#{{ claim.source_job.id }}</strong>
+    「{{ claim.source_job.name }}」 ·
+    纸片 <strong>#{{ claim.piece.id }}</strong> ·
+    余纸尺寸 <strong>{{ claim.piece_w }}×{{ claim.piece_h }} mm</strong>
+    <span class="muted">（原坐标 {{ claim.piece.x0 }},{{ claim.piece.y0 }}–{{ claim.piece.x1 }},{{ claim.piece.y1 }}）</span>
+  </div>
+  <p class="hint" style="margin-top:8px">
+    宽高已按余纸锁定；请照常录入新印张画框并提交。提交成功后原纸片才会标记为“已领用”并禁止落刀。
+    <a href="{{ url_for('job_page', job_id=claim.source_job.id) }}">← 返回源印张</a>
+  </p>
+</div>
+{% endif %}
 
 {% if errors %}
 <div class="error-box">
@@ -12,13 +31,17 @@
 <div class="home-grid">
   <div>
     <div class="card">
-      <h1>录入印张与画框</h1>
+      <h1>{% if claim %}录入试印画框{% else %}录入印张与画框{% endif %}</h1>
       <p class="muted" style="margin-top:-6px">
         纸张尺寸与画框坐标均为整数毫米；原点在左上角，画框用 <code>x, y, 宽 w, 高 h</code> 表示。
         最多 12 幅，画框之间允许边贴边，但不能有正面积重叠。
       </p>
 
       <form id="job-form" method="post" action="{{ url_for('create_job_route') }}" novalidate>
+        {% if claim %}
+        <input type="hidden" name="claim_source_job_id" value="{{ claim.source_job.id }}">
+        <input type="hidden" name="claim_piece_id" value="{{ claim.piece.id }}">
+        {% endif %}
         <div class="row">
           <label class="field" style="flex:2 1 220px">
             <span>印张名称</span>
@@ -27,12 +50,16 @@
         </div>
         <div class="row">
           <label class="field">
-            <span>纸张宽 W (mm)</span>
-            <input type="number" name="paper_w" id="f-w" min="1" step="1" required>
+            <span>纸张宽 W (mm){% if claim %} · 余纸宽，已锁定{% endif %}</span>
+            <input type="number" name="paper_w" id="f-w" min="1" step="1" required
+                   value="{{ old_payload.paper_w if old_payload and old_payload.paper_w is not none else (claim.piece_w if claim else '') }}"
+                   {% if claim %}readonly aria-readonly="true"{% endif %}>
           </label>
           <label class="field">
-            <span>纸张高 H (mm)</span>
-            <input type="number" name="paper_h" id="f-h" min="1" step="1" required>
+            <span>纸张高 H (mm){% if claim %} · 余纸高，已锁定{% endif %}</span>
+            <input type="number" name="paper_h" id="f-h" min="1" step="1" required
+                   value="{{ old_payload.paper_h if old_payload and old_payload.paper_h is not none else (claim.piece_h if claim else '') }}"
+                   {% if claim %}readonly aria-readonly="true"{% endif %}>
           </label>
         </div>
 
@@ -59,8 +86,12 @@
         <div id="form-errors" class="error-box" style="display:none;margin-top:12px"></div>
 
         <div class="mt16" style="display:flex;gap:10px;align-items:center">
-          <button class="btn" type="submit">生成裁切方案 →</button>
-          <span class="hint" style="margin:0">提交后进入操作页查看最多可成几幅与逐刀切序。</span>
+          <button class="btn" type="submit">
+            {% if claim %}确认领用并生成试印方案 →{% else %}生成裁切方案 →{% endif %}
+          </button>
+          <span class="hint" style="margin:0">
+            {% if claim %}提交时原子校验余纸仍可领；失败会整笔撤回。{% else %}提交后进入操作页查看最多可成几幅与逐刀切序。{% endif %}
+          </span>
         </div>
       </form>
     </div>

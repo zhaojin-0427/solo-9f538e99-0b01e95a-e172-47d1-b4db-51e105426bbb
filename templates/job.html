@@ -19,6 +19,49 @@
   </div>
 </div>
 
+{% if provenance %}
+<div class="card provenance-card" id="provenance">
+  <div style="display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;align-items:flex-start">
+    <div>
+      <h2 style="margin-bottom:6px">余纸出处 / 退回</h2>
+      <div class="claim-provenance-line">
+        本印张由空白余纸开成：出处为
+        <strong>印张 #{{ provenance.source_job_id }}</strong>
+        的 <strong>纸片 #{{ provenance.source_piece_id }}</strong>，
+        余纸尺寸 <strong>{{ provenance.piece_w }}×{{ provenance.piece_h }} mm</strong>
+        （即本印张宽高；原坐标 {{ provenance.piece_geom }}；
+        源纸 {{ provenance.source_paper_w }}×{{ provenance.source_paper_h }} mm）。
+      </div>
+      <div class="hint" style="margin-top:6px">
+        出处编号与尺寸已独立留存；源印张重开或删除后，这里仍可查询。
+        {% if provenance.source_job_exists %}
+          源印张当前仍存在：<a href="{{ url_for('job_page', job_id=provenance.source_job_id) }}">#{{ provenance.source_job_id }}</a>。
+        {% else %}
+          源印张 #{{ provenance.source_job_id }} 已删除。
+        {% endif %}
+        {% if not provenance.source_piece_exists %}
+          <strong>原纸片 #{{ provenance.source_piece_id }} 已不存在（源印张已重开或删除）。</strong>
+        {% endif %}
+      </div>
+      {% if provenance.return_block_message %}
+      <div class="warn-inline" style="margin-top:8px">退回条件未满足：{{ provenance.return_block_message }}。</div>
+      {% endif %}
+    </div>
+    <div class="return-action">
+      {% if provenance.returnable %}
+      <form method="post" action="{{ url_for('return_claim_route', job_id=job.id) }}"
+            onsubmit="return confirm('确认领错并退回源纸片？本印张将被撤销，原纸片恢复可裁。')">
+        <button class="btn danger" type="submit">↩ 退回余纸并撤销本印张</button>
+      </form>
+      {% else %}
+      <button class="btn ghost" type="button" disabled
+              title="{{ provenance.return_block_message or '当前不能退回' }}">不可退回</button>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <div class="stats">
   <div class="stat"><div class="k">画框总数</div><div class="v">{{ frames|length }}</div>
     <div class="sub">{{ job.paper_w }}×{{ job.paper_h }} mm</div></div>
@@ -66,11 +109,12 @@
           <!-- current leaf pieces -->
           {% for p in diagram.pieces if p.status != 'split' %}
           <rect x="{{ p.x }}" y="{{ p.y }}" width="{{ p.w }}" height="{{ p.h }}"
-                fill="{% if p.status == 'finished' %}rgba(22,163,74,.10){% else %}rgba(37,99,235,.05){% endif %}"
-                stroke="{% if p.status == 'finished' %}#16a34a{% else %}#60a5fa{% endif %}"
-                stroke-width="1.4"></rect>
+                fill="{% if p.status == 'finished' %}rgba(22,163,74,.10){% elif p.status == 'claimed' %}rgba(217,119,6,.16){% else %}rgba(37,99,235,.05){% endif %}"
+                stroke="{% if p.status == 'finished' %}#16a34a{% elif p.status == 'claimed' %}#d97706{% else %}#60a5fa{% endif %}"
+                stroke-width="{% if p.status == 'claimed' %}2.2{% else %}1.4{% endif %}"
+                stroke-dasharray="{% if p.status == 'claimed' %}7 4{% else %}0{% endif %}"></rect>
           <text x="{{ p.label_x }}" y="{{ p.label_y }}" font-size="12" font-weight="800"
-                fill="{% if p.status == 'finished' %}#15803d{% else %}#2563eb{% endif %}">#{{ p.id }}{% if p.status == 'finished' %} 成品{% endif %}</text>
+                fill="{% if p.status == 'finished' %}#15803d{% elif p.status == 'claimed' %}#b45309{% else %}#2563eb{% endif %}">#{{ p.id }}{% if p.status == 'finished' %} 成品{% elif p.status == 'claimed' %} 已领用{% endif %}</text>
           {% endfor %}
 
           <!-- frames -->
@@ -104,6 +148,7 @@
         <span><i style="background:rgba(22,163,74,.3);border:1px solid #15803d"></i>已成品</span>
         <span><i style="background:url(#hatch);border:1px solid #dc2626"></i>切坏</span>
         <span><i style="background:rgba(37,99,235,.08);border:1px solid #60a5fa"></i>当前纸片（#编号）</span>
+        <span><i style="background:rgba(217,119,6,.18);border:1px dashed #d97706"></i>已领用余纸</span>
         <span><i style="background:#ea580c"></i>推荐刀序（数字）</span>
       </div>
     </div>
@@ -151,6 +196,29 @@
   </div>
 
   <div>
+    {% set claimable_contexts = claim_ctx_by_piece.values() | selectattr('claimable') | list %}
+    {% if claimable_contexts %}
+    <div class="card claim-card">
+      <h2>领用空白余纸做试印</h2>
+      <p class="hint" style="margin-top:-4px">
+        只可领用已经落刀切出、尚未领用的活纸片；与任一原画框（含已切坏、已成品）有正面积重叠时不可领。
+      </p>
+      {% for ctx in claimable_contexts %}
+      <div class="claimable-row">
+        <div>
+          <strong>纸片 #{{ ctx.piece.id }}</strong>
+          <code class="muted">{{ ctx.piece.x0 }},{{ ctx.piece.y0 }}–{{ ctx.piece.x1 }},{{ ctx.piece.y1 }}
+            · {{ ctx.piece_w }}×{{ ctx.piece_h }} mm</code>
+        </div>
+        <a class="btn secondary small"
+           href="{{ url_for('claim_piece_form_route', source_job_id=job.id, piece_id=ctx.piece.id) }}">
+          领作试印新印张 →
+        </a>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     <div class="card">
       <h2>登记实际落刀</h2>
       {% if active_pieces %}
@@ -199,14 +267,27 @@
       <h2>当前纸片</h2>
       <ul class="piece-list">
         {% for p in pieces|sort(attribute='id') %}
-        <li>
+        {% set claim_ctx = claim_ctx_by_piece.get(p.id) %}
+        <li class="piece-row">
           <span class="badge {{ p.status }}">
-            {% if p.status == 'active' %}活{% elif p.status == 'split' %}已分{% else %}成品{% endif %}
+            {% if p.status == 'active' %}活{% elif p.status == 'split' %}已分{% elif p.status == 'claimed' %}已领用{% else %}成品{% endif %}
           </span>
           <strong>#{{ p.id }}</strong>
           <code class="muted">[{{ p.x0 }},{{ p.y0 }}]–[{{ p.x1 }},{{ p.y1 }}]
             {{ p.x1 - p.x0 }}×{{ p.y1 - p.y0 }}</code>
           {% if p.parent_id %}<span class="piece-tree">↳ 来自 #{{ p.parent_id }}</span>{% endif %}
+          {% if p.status == 'claimed' and claim_ctx and claim_ctx.claim and claim_ctx.claim.new_job_id %}
+            <span class="claim-link">→ 试印印张
+              <a href="{{ url_for('job_page', job_id=claim_ctx.claim.new_job_id) }}">
+                #{{ claim_ctx.claim.new_job_id }}
+              </a>
+            </span>
+          {% elif claim_ctx and not claim_ctx.claimable and p.status == 'active' and claim_ctx.reason_code in ['frame_overlap', 'not_cut_out'] %}
+            <span class="piece-blocked" title="{{ claim_ctx.reason }}">不可领：{{ claim_ctx.reason_code == 'frame_overlap' and '压画框' or '未切出' }}</span>
+          {% elif claim_ctx and claim_ctx.claimable %}
+            <a class="btn secondary small piece-claim-btn"
+               href="{{ url_for('claim_piece_form_route', source_job_id=job.id, piece_id=p.id) }}">领用</a>
+          {% endif %}
         </li>
         {% endfor %}
       </ul>
