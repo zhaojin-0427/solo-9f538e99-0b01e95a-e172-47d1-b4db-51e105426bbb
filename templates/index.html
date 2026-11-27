@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}新开印张 · 裁纸师{% endblock %}
+{% block content %}
+
+{% if errors %}
+<div class="error-box">
+  <strong>录入有误，未创建：</strong>
+  <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<div class="home-grid">
+  <div>
+    <div class="card">
+      <h1>录入印张与画框</h1>
+      <p class="muted" style="margin-top:-6px">
+        纸张尺寸与画框坐标均为整数毫米；原点在左上角，画框用 <code>x, y, 宽 w, 高 h</code> 表示。
+        最多 12 幅，画框之间允许边贴边，但不能有正面积重叠。
+      </p>
+
+      <form id="job-form" method="post" action="{{ url_for('create_job_route') }}" novalidate>
+        <div class="row">
+          <label class="field" style="flex:2 1 220px">
+            <span>印张名称</span>
+            <input type="text" name="name" id="f-name" maxlength="80" placeholder="例如：首批版画">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field">
+            <span>纸张宽 W (mm)</span>
+            <input type="number" name="paper_w" id="f-w" min="1" step="1" required>
+          </label>
+          <label class="field">
+            <span>纸张高 H (mm)</span>
+            <input type="number" name="paper_h" id="f-h" min="1" step="1" required>
+          </label>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;margin:14px 0 8px">
+          <h2 style="margin:0">画框清单 <span id="frame-count" class="muted" style="font-size:13px;font-weight:400"></span></h2>
+          <button type="button" class="btn secondary small" id="add-frame">＋ 添加画框</button>
+        </div>
+
+        <div class="table-scroll">
+          <table class="frame-editor-table">
+            <thead>
+              <tr>
+                <th style="width:34px">#</th>
+                <th>名称</th>
+                <th>x</th><th>y</th><th>宽 w</th><th>高 h</th>
+                <th style="width:52px"></th>
+              </tr>
+            </thead>
+            <tbody id="frame-rows"></tbody>
+          </table>
+        </div>
+        <p class="hint">坐标是画框左上角；右边界 = x+w，下边界 = y+h。</p>
+
+        <div id="form-errors" class="error-box" style="display:none;margin-top:12px"></div>
+
+        <div class="mt16" style="display:flex;gap:10px;align-items:center">
+          <button class="btn" type="submit">生成裁切方案 →</button>
+          <span class="hint" style="margin:0">提交后进入操作页查看最多可成几幅与逐刀切序。</span>
+        </div>
+      </form>
+    </div>
+
+    <div class="card tight">
+      <h2>网页预览</h2>
+      <div class="preview-box">
+        <svg id="editor-preview" viewBox="0 0 760 420" preserveAspectRatio="xMidYMid meet" role="img" aria-label="画框预览"></svg>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>内置示例（一键开单）</h2>
+      {% for s in samples %}
+      <form method="post" action="{{ url_for('create_sample', key=s.key) }}" class="sample-form">
+        <button class="btn secondary block" type="submit" style="margin-bottom:10px;text-align:left">
+          {{ s.label }}
+        </button>
+      </form>
+      {% endfor %}
+      <p class="hint">第一个示例是“风车式”互锁排版：不存在不切到任何画的第一刀，因此必须舍弃一幅；排程会在同数量方案中优先保住总面积更大的画，即舍弃最小的「小画 D」。</p>
+    </div>
+
+    <div class="card">
+      <h2>已有印张</h2>
+      {% if job_stats %}
+        {% for j, total, done, ruined in job_stats %}
+        <div class="job-item">
+          <div>
+            <a class="t" href="{{ url_for('job_page', job_id=j.id) }}">{{ j.name }}</a>
+            <div class="muted">{{ j.paper_w }}×{{ j.paper_h }} mm ·
+              {{ total }} 框 · 成 {{ done }} · 坏 {{ ruined }} · #{{ j.id }}</div>
+          </div>
+          <div class="job-actions">
+            <a class="btn small" href="{{ url_for('job_page', job_id=j.id) }}">操作</a>
+            <form class="inline" method="post" action="{{ url_for('delete_route', job_id=j.id) }}"
+                  onsubmit="return confirm('删除印张 #{{ j.id }} 及其全部进度？')">
+              <button class="btn danger small" type="submit">删除</button>
+            </form>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">还没有印张，从左侧录入或选一个示例开始。</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if old_payload %}
+<script id="old-payload" type="application/json">{{ old_payload | tojson }}</script>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='editor.js') }}"></script>
+{% endblock %}

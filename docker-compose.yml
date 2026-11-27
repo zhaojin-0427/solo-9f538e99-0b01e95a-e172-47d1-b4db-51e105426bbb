@@ -1,0 +1,23 @@
+services:
+  web:
+    build: .
+    image: paper-cutter:latest
+    container_name: paper-cutter-web
+    ports:
+      - "5000:5000"
+    environment:
+      # Path inside the container; persisted on the named volume below.
+      CUTTING_DB: /data/cutting.db
+      # Uncomment to fix the flash/session signing key across restarts:
+      # SECRET_KEY: change-me-to-a-long-random-string
+    volumes:
+      - cutting-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+
+volumes:
+  cutting-data:

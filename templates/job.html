@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}{{ job.name }} · 裁切操作{% endblock %}
+{% block content %}
+
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+  <div>
+    <h1 style="margin-bottom:2px">{{ job.name }}</h1>
+    <div class="muted">印张 #{{ job.id }} · 纸张 {{ job.paper_w }}×{{ job.paper_h }} mm · 录入于 {{ job.created_at }}</div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <form method="post" action="{{ url_for('reset_route', job_id=job.id) }}"
+          onsubmit="return confirm('清空全部落刀登记，恢复为完整印张？')">
+      <button class="btn ghost" type="submit">↺ 重新开始</button>
+    </form>
+    <form method="post" action="{{ url_for('delete_route', job_id=job.id) }}"
+          onsubmit="return confirm('删除该印张及全部进度？')">
+      <button class="btn danger" type="submit">删除印张</button>
+    </form>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="k">画框总数</div><div class="v">{{ frames|length }}</div>
+    <div class="sub">{{ job.paper_w }}×{{ job.paper_h }} mm</div></div>
+  <div class="stat"><div class="k">已裁成</div><div class="v green">{{ counts.done }}</div>
+    <div class="sub">四边与画框重合</div></div>
+  <div class="stat"><div class="k">已切坏</div><div class="v red">{{ counts.ruined }}</div>
+    <div class="sub">刀入画心，不再排程</div></div>
+  <div class="stat"><div class="k">待排画框</div><div class="v blue">{{ counts.pending }}</div>
+    <div class="sub">分布在 {{ active_pieces|length }} 张活纸片上</div></div>
+</div>
+
+<div class="hero-plan">
+  <div class="big">{{ plan.max_more }}</div>
+  <div class="txt">
+    <strong>按当前剩余纸片，最多还能裁成 {{ plan.max_more }} 幅。</strong><br>
+    已裁成 {{ counts.done }} 幅；若严格走完推荐切序，最终可得
+    <strong style="color:var(--green)">{{ counts.done + plan.max_more }}</strong> / {{ frames|length }} 幅。
+    推荐切序共 {{ plan.steps|length }} 刀
+    （跨 {{ plan.pieces|selectattr('score','>',0)|list|length }} 张纸片有产出）。
+    {% if plan.abandoned %}
+      <br><span style="color:var(--red)">该最优切序将舍弃当前待排中的：
+      {% for a in plan.abandoned %}「{{ a.name }}」{% if not loop.last %}、{% endif %}{% endfor %}。</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="grid-2">
+  <div>
+    <div class="card">
+      <h2>印张 / 纸片 / 推荐刀位</h2>
+      <div class="diagram-wrap">
+        <svg class="diagram" viewBox="0 0 {{ diagram.view_w }} {{ diagram.view_h }}" role="img" aria-label="裁切示意图">
+          <defs>
+            <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <rect width="7" height="7" fill="#fee2e2"></rect>
+              <line x1="0" y1="0" x2="0" y2="7" stroke="#ef4444" stroke-width="2"></line>
+            </pattern>
+          </defs>
+
+          <!-- paper -->
+          <rect x="{{ diagram.sheet_x }}" y="{{ diagram.sheet_y }}"
+                width="{{ diagram.sheet_w }}" height="{{ diagram.sheet_h }}"
+                fill="#fffdf5" stroke="#8a7a55" stroke-width="2"></rect>
+
+          <!-- current leaf pieces -->
+          {% for p in diagram.pieces if p.status != 'split' %}
+          <rect x="{{ p.x }}" y="{{ p.y }}" width="{{ p.w }}" height="{{ p.h }}"
+                fill="{% if p.status == 'finished' %}rgba(22,163,74,.10){% else %}rgba(37,99,235,.05){% endif %}"
+                stroke="{% if p.status == 'finished' %}#16a34a{% else %}#60a5fa{% endif %}"
+                stroke-width="1.4"></rect>
+          <text x="{{ p.label_x }}" y="{{ p.label_y }}" font-size="12" font-weight="800"
+                fill="{% if p.status == 'finished' %}#15803d{% else %}#2563eb{% endif %}">#{{ p.id }}{% if p.status == 'finished' %} 成品{% endif %}</text>
+          {% endfor %}
+
+          <!-- frames -->
+          {% for f in diagram.frames %}
+          <rect x="{{ f.x }}" y="{{ f.y }}" width="{{ f.w }}" height="{{ f.h }}"
+                fill="{% if f.status == 'done' %}rgba(22,163,74,.22){% elif f.status == 'ruined' %}url(#hatch){% else %}rgba(37,99,235,.10){% endif %}"
+                stroke="{% if f.status == 'done' %}#15803d{% elif f.status == 'ruined' %}#dc2626{% else %}#1d4ed8{% endif %}"
+                stroke-width="2">
+            <title>{{ f.name }} [{{ f.status }}]</title>
+          </rect>
+          {% if f.w > 46 and f.h > 18 %}
+          <text x="{{ f.cx }}" y="{{ f.cy + 4 }}" text-anchor="middle" font-size="12.5" font-weight="700"
+                fill="{% if f.status == 'done' %}#14532d{% elif f.status == 'ruined' %}#991b1b{% else %}#1e3a8a{% endif %}">
+            {{ f.name }}{% if f.status == 'ruined' %} ✕{% elif f.status == 'done' %} ✓{% endif %}
+          </text>
+          {% endif %}
+          {% endfor %}
+
+          <!-- planned cut lines -->
+          {% for ln in diagram.lines %}
+          <line x1="{{ ln.x1 }}" y1="{{ ln.y1 }}" x2="{{ ln.x2 }}" y2="{{ ln.y2 }}"
+                stroke="#ea580c" stroke-width="{% if ln.first %}3{% else %}2{% endif %}"
+                stroke-dasharray="8 5" stroke-linecap="round" opacity="{% if ln.first %}1{% else %}0.75{% endif %}"></line>
+          <circle cx="{{ ln.mx }}" cy="{{ ln.my }}" r="11" fill="#ea580c" stroke="#fff" stroke-width="2"></circle>
+          <text x="{{ ln.mx }}" y="{{ ln.my + 4 }}" text-anchor="middle" font-size="12" font-weight="800" fill="#fff">{{ ln.seq }}</text>
+          {% endfor %}
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:rgba(37,99,235,.18);border:1px solid #1d4ed8"></i>待裁画框</span>
+        <span><i style="background:rgba(22,163,74,.3);border:1px solid #15803d"></i>已成品</span>
+        <span><i style="background:url(#hatch);border:1px solid #dc2626"></i>切坏</span>
+        <span><i style="background:rgba(37,99,235,.08);border:1px solid #60a5fa"></i>当前纸片（#编号）</span>
+        <span><i style="background:#ea580c"></i>推荐刀序（数字）</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>达到最多数量的切序</h2>
+      {% if plan.steps %}
+        {% for st in plan.steps %}
+        <div class="plan-step {% if st.global_seq == 1 %}first{% endif %}">
+          <div class="head">
+            <span class="seq-dot">{{ st.global_seq }}</span>
+            <div>
+              <div class="what">
+                纸片 <code class="pos">{{ st.piece_label }}</code>
+                → {{ '竖切（垂直线）' if st.orient == 'V' else '横切（水平线）' }}
+                @ {{ st.position }} mm
+                （{{ 'x' if st.orient == 'V' else 'y' }}={{ st.position }}）
+              </div>
+              <div class="meta">
+                纸片范围 [{{ st.piece_rect[0] }}, {{ st.piece_rect[1] }}] – [{{ st.piece_rect[2] }}, {{ st.piece_rect[3] }}]；
+                下一刀起分成 {{ st.child_labels[0] }} 与 {{ st.child_labels[1] }}
+              </div>
+              {% if st.ruins %}
+              <div class="warn">⚠ 此刀会穿过并舍弃：{% for r in st.ruins %}「{{ r.name }}」{% if not loop.last %}、{% endif %}{% endfor %}</div>
+              {% endif %}
+            </div>
+            {% if st.piece_id %}
+            <button type="button" class="btn secondary small fill-step"
+                    data-piece="{{ st.piece_id }}" data-orient="{{ st.orient }}"
+                    data-pos="{{ st.position }}">填入登记</button>
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">
+          {% if active_pieces|length == 0 %}
+            没有可再下刀的 active 纸片：所有纸片要么已是成品，要么已无待排画框。
+          {% else %}
+            当前剩余纸片里已经没有可继续救出的完整画框了（能成的都已标出）。
+          {% endif %}
+        </p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>登记实际落刀</h2>
+      {% if active_pieces %}
+      <form method="post" action="{{ url_for('register_cut_route', job_id=job.id) }}" id="cut-form">
+        <label class="field">
+          <span>下刀纸片（只能选当前未裁开的活纸片）</span>
+          <select name="piece_id" id="cut-piece" required>
+            {% for p in active_pieces %}
+            <option value="{{ p.id }}"
+                    data-x0="{{ p.x0 }}" data-y0="{{ p.y0 }}" data-x1="{{ p.x1 }}" data-y1="{{ p.y1 }}">
+              #{{ p.id }} · [{{ p.x0 }},{{ p.y0 }}]–[{{ p.x1 }},{{ p.y1 }}]
+              （{{ p.x1 - p.x0 }}×{{ p.y1 - p.y0 }}）
+            </option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <div class="field">
+          <span>切向</span>
+          <div class="orient-switch">
+            <label><input type="radio" name="orient" value="V" checked>竖切 x</label>
+            <label><input type="radio" name="orient" value="H">横切 y</label>
+          </div>
+        </div>
+
+        <label class="field">
+          <span id="pos-label">竖切位置 x (mm，整数)</span>
+          <input type="number" name="pos" id="cut-pos" step="1" required placeholder="实际落刀坐标，可与推荐不同">
+        </label>
+        <input type="hidden" name="suggested_pos" id="cut-suggested" value="">
+        <p class="hint" id="range-hint"></p>
+
+        <button class="btn block" type="submit" style="margin-top:10px">登记这一刀并重新排算</button>
+        <div class="rule-note">
+          三种情况会被拒绝且进度原样保留：① 该纸片已裁过并分成两片；
+          ② 该纸片已是四边重合的成品；③ 刀位不在纸片严格内部（贴边/越界）。
+          切偏也照登，系统会按切完后的真实两片重新排程；被刀穿过的画框记为切坏，不再参与排程。
+        </div>
+      </form>
+      {% else %}
+      <p class="muted">当前没有可下刀的活纸片。可“重新开始”清空登记。</p>
+      {% endif %}
+    </div>
+
+    <div class="card tight">
+      <h2>当前纸片</h2>
+      <ul class="piece-list">
+        {% for p in pieces|sort(attribute='id') %}
+        <li>
+          <span class="badge {{ p.status }}">
+            {% if p.status == 'active' %}活{% elif p.status == 'split' %}已分{% else %}成品{% endif %}
+          </span>
+          <strong>#{{ p.id }}</strong>
+          <code class="muted">[{{ p.x0 }},{{ p.y0 }}]–[{{ p.x1 }},{{ p.y1 }}]
+            {{ p.x1 - p.x0 }}×{{ p.y1 - p.y0 }}</code>
+          {% if p.parent_id %}<span class="piece-tree">↳ 来自 #{{ p.parent_id }}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div class="card tight">
+      <h2>落刀记录（{{ cuts|length }}）</h2>
+      {% if cuts %}
+      <div class="table-scroll" style="max-height:300px">
+        <table>
+          <thead><tr><th>#</th><th>纸片</th><th>方向</th><th>刀位</th><th>结果</th></tr></thead>
+          <tbody>
+          {% for c in cuts %}
+            <tr>
+              <td>{{ c.id }}</td>
+              <td>#{{ c.piece_id }}</td>
+              <td>{{ '竖 x' if c.orient == 'V' else '横 y' }}<br><span class="muted">{{ c.pos }}</span></td>
+              <td><code class="pos">{{ c.pos }}</code>
+                {% if c.deviation %}<div class="muted">偏 {{ '%+d'|format(c.deviation) }}</div>{% endif %}
+              </td>
+              <td class="muted" style="font-size:12.5px">{{ c.note or '—' }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="muted">还没有登记实际落刀。可点推荐切序上的“填入登记”，再故意把刀位改偏试试。</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='job.js') }}"></script>
+{% endblock %}

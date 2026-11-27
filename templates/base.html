@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}裁纸师 · 版画裁切排程{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="{{ url_for('index') }}">
+      <span class="brand-mark">✂</span> 裁纸师工作台
+    </a>
+    <span class="brand-sub">guillotine cuts · 最多 12 框 · SQLite 进度</span>
+  </div>
+</header>
+
+<main class="wrap">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flashes">
+        {% for category, msg in messages %}
+          <div class="flash flash-{{ category }}">{{ msg }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="wrap footer">
+  坐标单位 mm，原点在纸张左上角，y 向下；刀缝按 0 计算。横切为水平线（给 y），竖切为垂直线（给 x）。
+</footer>
+{% block scripts %}{% endblock %}
+</body>
+</html>
